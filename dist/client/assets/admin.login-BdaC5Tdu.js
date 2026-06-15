@@ -1,0 +1,1 @@
+import{j as t}from"./index-Bp0uPgnL.js";import{A as i}from"./AuthShell-UFlSqoey.js";import"./Navbar-CdV539LF.js";import"./input-DfcZh2uO.js";import"./label-CrbTe0jn.js";const r=()=>t.jsx(i,{title:"Masuk Admin",subtitle:"Halaman ini hanya untuk administrator ReVibe.",mode:"login",role:"admin",switchHref:"/",switchLabel:"Kembali ke beranda"});export{r as component};

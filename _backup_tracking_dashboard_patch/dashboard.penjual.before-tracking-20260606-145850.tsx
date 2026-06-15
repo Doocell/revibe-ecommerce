@@ -1,0 +1,3587 @@
+﻿import { createFileRoute } from "@tanstack/react-router";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type ChangeEvent,
+  type FormEvent,
+} from "react";
+import { toast } from "sonner";
+import {
+  BarChart3,
+  Bell,
+  Boxes,
+  CheckCircle2,
+  ImageIcon,
+  Loader2,
+  MessageCircle,
+  Package,
+  PlusCircle,
+  RefreshCw,
+  Save,
+  Search,
+  Settings,
+  ShoppingBag,
+  Store,
+  Trash2,
+  Truck,
+  Upload,
+  UserRound,
+  XCircle,
+  type LucideIcon,
+} from "lucide-react";
+import { Footer } from "@/components/Footer";
+import { Navbar } from "@/components/Navbar";
+import { RoleGuard } from "@/components/RoleGuard";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { useAuth } from "@/lib/auth";
+import { supabase } from "@/integrations/supabase/client";
+import { uploadProductImages } from "@/lib/product-image-upload";
+
+const db = supabase as any;
+
+export const Route = createFileRoute("/dashboard/penjual")({
+  component: () => (
+    <RoleGuard required="seller">
+      <SellerDashboardPage />
+    </RoleGuard>
+  ),
+});
+
+type SellerTab =
+  | "overview"
+  | "add"
+  | "products"
+  | "orders"
+  | "report"
+  | "profile"
+  | "settings";
+
+type CategoryRow = {
+  id: string;
+  name: string;
+  slug: string | null;
+};
+
+type ProductRow = {
+  id: string;
+  seller_id: string;
+  category_id: string | null;
+  title: string;
+  description: string | null;
+  price: number | string;
+  original_price: number | string | null;
+  condition: string;
+  location: string | null;
+  stock: number;
+  sold: number | null;
+  images: string[] | null;
+  status: string;
+  average_rating?: number | string | null;
+  review_count?: number | string | null;
+  created_at: string;
+  updated_at: string | null;
+  categories?: CategoryRow | CategoryRow[] | null;
+};
+
+type OrderItemRow = {
+  id: string;
+  product_id: string;
+  quantity: number;
+  price: number | string;
+  products:
+  | {
+    id: string;
+    title: string;
+    images: string[] | null;
+  }
+  | {
+    id: string;
+    title: string;
+    images: string[] | null;
+  }[]
+  | null;
+};
+
+type OrderRow = {
+  id: string;
+  buyer_id: string;
+  seller_id: string;
+  order_status: string;
+  payment_status: string;
+  payment_method: string | null;
+  shipping_method: string | null;
+  shipping_address: string | null;
+  shipping_cost: number | string | null;
+  subtotal: number | string | null;
+  total: number | string | null;
+  courier: string | null;
+  tracking_number: string | null;
+  shipped_at: string | null;
+  created_at: string;
+  updated_at: string | null;
+  order_items: OrderItemRow[];
+};
+
+type ProfileForm = {
+  full_name: string;
+  whatsapp: string;
+  avatar_url: string;
+  address: string;
+  city: string;
+  bio: string;
+  shop_name: string;
+  shop_description: string;
+  shop_location: string;
+  shop_logo_url: string;
+};
+
+type DailySale = {
+  label: string;
+  total: number;
+};
+
+const emptyProfileForm: ProfileForm = {
+  full_name: "",
+  whatsapp: "",
+  avatar_url: "",
+  address: "",
+  city: "",
+  bio: "",
+  shop_name: "",
+  shop_description: "",
+  shop_location: "",
+  shop_logo_url: "",
+};
+
+const COURIER_OPTIONS = [
+  "JNE",
+  "J&T",
+  "SiCepat",
+  "Anteraja",
+  "Pos Indonesia",
+  "TIKI",
+  "Wahana",
+  "Ninja Xpress",
+  "GrabExpress",
+  "GoSend",
+  "Lainnya",
+];
+
+function isSellerTab(value: string | null | undefined): value is SellerTab {
+  return (
+    value === "overview" ||
+    value === "add" ||
+    value === "products" ||
+    value === "orders" ||
+    value === "report" ||
+    value === "profile" ||
+    value === "settings"
+  );
+}
+
+function getInitialSellerTab(): SellerTab {
+  if (typeof window === "undefined") return "overview";
+
+  const tab = new URLSearchParams(window.location.search).get("tab");
+
+  if (isSellerTab(tab)) return tab;
+
+  return "overview";
+}
+
+function SellerDashboardPage() {
+  const { user } = useAuth();
+
+  const [activeTab, setActiveTab] = useState<SellerTab>(getInitialSellerTab);
+  const [highlightOrderId, setHighlightOrderId] = useState("");
+  const [highlightProductId, setHighlightProductId] = useState("");
+
+  const [categories, setCategories] = useState<CategoryRow[]>([]);
+  const [products, setProducts] = useState<ProductRow[]>([]);
+  const [orders, setOrders] = useState<OrderRow[]>([]);
+  const [profileForm, setProfileForm] =
+    useState<ProfileForm>(emptyProfileForm);
+
+  const [loading, setLoading] = useState(true);
+  const [savingProfile, setSavingProfile] = useState(false);
+
+  function applyUrlState() {
+    if (typeof window === "undefined") return;
+
+    const searchParams = new URLSearchParams(window.location.search);
+    const tab = searchParams.get("tab");
+    const orderId = searchParams.get("order") ?? "";
+    const productId = searchParams.get("product") ?? "";
+
+    if (isSellerTab(tab)) {
+      setActiveTab(tab);
+    }
+
+    setHighlightOrderId(orderId);
+    setHighlightProductId(productId);
+  }
+
+  async function loadDashboardData() {
+    if (!user?.id) {
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const [categoryResult, productResult, orderResult, profileResult] =
+        await Promise.all([
+          db.from("categories").select("id, name, slug").order("name"),
+          db
+            .from("products")
+            .select(
+              `
+              *,
+              categories(id, name, slug)
+            `,
+            )
+            .eq("seller_id", user.id)
+            .order("created_at", { ascending: false }),
+          db
+            .from("orders")
+            .select(
+              `
+              *,
+              order_items(
+                id,
+                product_id,
+                quantity,
+                price,
+                products(
+                  id,
+                  title,
+                  images
+                )
+              )
+            `,
+            )
+            .eq("seller_id", user.id)
+            .order("created_at", { ascending: false }),
+          db.from("profiles").select("*").eq("id", user.id).maybeSingle(),
+        ]);
+
+      if (categoryResult.error) throw new Error(categoryResult.error.message);
+      if (productResult.error) throw new Error(productResult.error.message);
+      if (orderResult.error) throw new Error(orderResult.error.message);
+      if (profileResult.error) throw new Error(profileResult.error.message);
+
+      setCategories((categoryResult.data ?? []) as CategoryRow[]);
+      setProducts((productResult.data ?? []) as ProductRow[]);
+      setOrders((orderResult.data ?? []) as OrderRow[]);
+
+      const profile = profileResult.data;
+
+      if (profile) {
+        setProfileForm({
+          full_name: profile.full_name ?? "",
+          whatsapp: profile.whatsapp ?? "",
+          avatar_url: profile.avatar_url ?? "",
+          address: profile.address ?? "",
+          city: profile.city ?? "",
+          bio: profile.bio ?? "",
+          shop_name: profile.shop_name ?? "",
+          shop_description: profile.shop_description ?? "",
+          shop_location: profile.shop_location ?? "",
+          shop_logo_url: profile.shop_logo_url ?? "",
+        });
+      }
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Gagal memuat dashboard penjual.",
+      );
+
+      console.error("[Seller Dashboard Load Error]", error);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    applyUrlState();
+  }, []);
+
+  useEffect(() => {
+    loadDashboardData();
+  }, [user?.id]);
+
+  useEffect(() => {
+    function handlePopState() {
+      applyUrlState();
+    }
+
+    function handleSellerTabChange(event: Event) {
+      const customEvent = event as CustomEvent<{
+        tab?: string;
+        orderId?: string;
+        productId?: string;
+      }>;
+
+      const tab = customEvent.detail?.tab ?? "";
+      const orderId = customEvent.detail?.orderId ?? "";
+      const productId = customEvent.detail?.productId ?? "";
+
+      if (isSellerTab(tab)) {
+        setActiveTab(tab);
+      }
+
+      setHighlightOrderId(orderId);
+      setHighlightProductId(productId);
+
+      window.setTimeout(() => {
+        window.scrollTo({
+          top: 0,
+          behavior: "smooth",
+        });
+      }, 50);
+    }
+
+    window.addEventListener("popstate", handlePopState);
+    window.addEventListener("revibe:seller-tab-change", handleSellerTabChange);
+
+    return () => {
+      window.removeEventListener("popstate", handlePopState);
+      window.removeEventListener(
+        "revibe:seller-tab-change",
+        handleSellerTabChange,
+      );
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!user?.id) return;
+
+    const channel = db
+      .channel(`seller_orders_${user.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "orders",
+          filter: `seller_id=eq.${user.id}`,
+        },
+        () => {
+          loadDashboardData();
+        },
+      )
+      .subscribe();
+
+    return () => {
+      db.removeChannel(channel);
+    };
+  }, [user?.id]);
+
+  const completedOrders = useMemo(() => {
+    return orders.filter(
+      (order) =>
+        ["selesai", "pesanan_diterima"].includes(order.order_status) &&
+        order.payment_status === "dibayar",
+    );
+  }, [orders]);
+
+  const processingOrders = useMemo(() => {
+    return orders.filter((order) =>
+      [
+        "menunggu_konfirmasi_penjual",
+        "menunggu_konfirmasi",
+        "diproses_penjual",
+        "diproses",
+      ].includes(order.order_status),
+    );
+  }, [orders]);
+
+  const shippedOrders = useMemo(() => {
+    return orders.filter((order) => order.order_status === "dikirim");
+  }, [orders]);
+
+  const sevenDaySales = useMemo(() => {
+    const end = new Date();
+    const start = new Date();
+    start.setDate(start.getDate() - 6);
+
+    return buildDailySales({
+      orders: completedOrders,
+      start,
+      end,
+    });
+  }, [completedOrders]);
+
+  const stats = useMemo(() => {
+    const revenue = completedOrders.reduce((sum, order) => {
+      return sum + getOrderTotal(order);
+    }, 0);
+
+    return [
+      {
+        label: "Omzet Selesai",
+        value: formatIDR(revenue),
+        icon: BarChart3,
+      },
+      {
+        label: "Produk Saya",
+        value: String(products.length),
+        icon: Boxes,
+      },
+      {
+        label: "Pesanan Diproses",
+        value: String(processingOrders.length),
+        icon: Package,
+      },
+      {
+        label: "Pesanan Dikirim",
+        value: String(shippedOrders.length),
+        icon: Truck,
+      },
+    ];
+  }, [completedOrders, products, processingOrders, shippedOrders]);
+
+  async function handleSaveProfile(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!user?.id) return;
+
+    setSavingProfile(true);
+
+    try {
+      const { error } = await db.from("profiles").upsert(
+        {
+          id: user.id,
+          full_name: cleanText(profileForm.full_name),
+          whatsapp: cleanText(profileForm.whatsapp),
+          avatar_url: cleanText(profileForm.avatar_url),
+          address: cleanText(profileForm.address),
+          city: cleanText(profileForm.city),
+          bio: cleanText(profileForm.bio),
+          shop_name: cleanText(profileForm.shop_name),
+          shop_description: cleanText(profileForm.shop_description),
+          shop_location: cleanText(profileForm.shop_location),
+          shop_logo_url: cleanText(profileForm.shop_logo_url),
+          updated_at: new Date().toISOString(),
+        },
+        {
+          onConflict: "id",
+        },
+      );
+
+      if (error) throw new Error(error.message);
+
+      toast.success("Profil toko berhasil disimpan.");
+      await loadDashboardData();
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Gagal menyimpan profil toko.",
+      );
+    } finally {
+      setSavingProfile(false);
+    }
+  }
+
+  function updateProfileField<K extends keyof ProfileForm>(
+    key: K,
+    value: ProfileForm[K],
+  ) {
+    setProfileForm((current) => ({
+      ...current,
+      [key]: value,
+    }));
+  }
+
+  function openSellerTab(tab: SellerTab) {
+    setActiveTab(tab);
+
+    if (typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      url.searchParams.set("tab", tab);
+
+      if (tab !== "orders") {
+        url.searchParams.delete("order");
+      }
+
+      if (tab !== "products") {
+        url.searchParams.delete("product");
+      }
+
+      window.history.pushState({}, "", url.toString());
+
+      window.scrollTo({
+        top: 0,
+        behavior: "smooth",
+      });
+    }
+  }
+
+  const menuItems = [
+    {
+      key: "add",
+      title: "Tambah Produk",
+      description:
+        "Tambahkan produk preloved baru agar bisa diverifikasi admin dan tampil ke pembeli.",
+      icon: PlusCircle,
+      primary: true,
+    },
+    {
+      key: "products",
+      title: "Produk Saya",
+      description:
+        "Kelola daftar produk, edit stok, edit detail, dan nonaktifkan produk.",
+      icon: Boxes,
+    },
+    {
+      key: "orders",
+      title: "Pesanan Masuk",
+      description: "Kelola order buyer, proses pesanan, dan input resi.",
+      icon: ShoppingBag,
+    },
+    {
+      key: "voucher",
+      title: "Voucher / Kupon",
+      description: "Buat dan kelola kode diskon untuk pembeli.",
+      icon: Package,
+    },
+    {
+      key: "invoice",
+      title: "Invoice / Bukti Pesanan",
+      description: "Lihat dan cetak bukti transaksi dari pesanan toko.",
+      icon: Package,
+    },
+    {
+      key: "report",
+      title: "Laporan Penjualan",
+      description:
+        "Lihat omzet, order selesai, produk terjual, produk paling laku, dan grafik penjualan.",
+      icon: BarChart3,
+    },
+    {
+      key: "profile",
+      title: "Profil Toko",
+      description: "Edit nama toko, lokasi toko, logo, dan deskripsi toko.",
+      icon: UserRound,
+    },
+    {
+      key: "chat",
+      title: "Chat Buyer",
+      description: "Balas pertanyaan buyer tentang produk.",
+      icon: MessageCircle,
+    },
+    {
+      key: "notification",
+      title: "Notifikasi",
+      description: "Lihat notifikasi order, pembayaran, ulasan, dan chat.",
+      icon: Bell,
+    },
+    {
+      key: "complaints",
+      title: "Komplain Buyer",
+      description: "Lihat dan respons komplain yang diajukan pembeli.",
+      icon: Bell,
+    },
+    {
+      key: "settings",
+      title: "Pengaturan Seller",
+      description: "Pengaturan tambahan untuk toko dan akun seller.",
+      icon: Settings,
+    },
+  ] as const;
+
+  function handleMenuClick(key: string) {
+    if (key === "chat") {
+      window.location.href = "/chat";
+      return;
+    }
+
+    if (key === "notification") {
+      window.location.href = "/notifikasi";
+      return;
+    }
+
+    if (key === "complaints") {
+      window.location.href = "/komplain/penjual";
+      return;
+    }
+
+    if (key === "voucher") {
+      window.location.href = "/voucher/penjual";
+      return;
+    }
+
+    if (key === "invoice") {
+      window.location.href = "/invoice";
+      return;
+    }
+
+    if (isSellerTab(key)) {
+      openSellerTab(key);
+    }
+  }
+
+  return (
+    <div className="flex min-h-screen flex-col">
+      <Navbar />
+
+      <main className="flex-1">
+        <section className="container mx-auto px-4 py-10">
+          <div className="rounded-3xl border border-border bg-card p-8">
+            <div className="flex flex-col gap-5 md:flex-row md:items-center md:justify-between">
+              <div>
+                <div className="inline-flex items-center gap-2 rounded-full bg-primary/10 px-3 py-1 text-sm font-medium text-primary">
+                  <Store className="h-4 w-4" />
+                  Seller Panel
+                </div>
+
+                <h1 className="mt-4 text-3xl font-bold">
+                  Dashboard Penjual
+                </h1>
+
+                <p className="mt-2 max-w-2xl text-muted-foreground">
+                  Kelola produk, tambah barang baru, pantau pesanan, balas chat
+                  buyer, dan cek laporan penjualan toko kamu di ReVibe.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  className="gradient-brand text-white"
+                  onClick={() => openSellerTab("add")}
+                >
+                  <PlusCircle className="mr-2 h-4 w-4" />
+                  Tambah Produk
+                </Button>
+
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => openSellerTab("products")}
+                >
+                  <Boxes className="mr-2 h-4 w-4" />
+                  Produk Saya
+                </Button>
+
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => openSellerTab("orders")}
+                >
+                  <ShoppingBag className="mr-2 h-4 w-4" />
+                  Pesanan
+                </Button>
+
+                <Button asChild variant="outline">
+                  <a href="/voucher/penjual">Voucher Seller</a>
+                </Button>
+
+                <Button asChild variant="outline">
+                  <a href="/invoice">Invoice Seller</a>
+                </Button>
+
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={loadDashboardData}
+                  disabled={loading}
+                >
+                  {loading ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="mr-2 h-4 w-4" />
+                  )}
+                  Refresh
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          {loading ? (
+            <div className="mt-8 flex min-h-80 items-center justify-center rounded-2xl border border-dashed border-border">
+              <Loader2 className="h-7 w-7 animate-spin text-primary" />
+            </div>
+          ) : (
+            <>
+              <div className="mt-8 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                {stats.map((stat) => (
+                  <div
+                    key={stat.label}
+                    className="rounded-2xl border border-border bg-card p-5"
+                  >
+                    <stat.icon className="h-6 w-6 text-primary" />
+
+                    <div className="mt-4 text-2xl font-bold">
+                      {stat.value}
+                    </div>
+
+                    <div className="text-sm text-muted-foreground">
+                      {stat.label}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-8 grid gap-6 lg:grid-cols-[0.85fr_1.15fr]">
+                <div className="rounded-2xl border border-border bg-card p-6">
+                  <div>
+                    <h2 className="text-lg font-semibold">Menu Penjual</h2>
+
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      Klik menu untuk membuka fitur tanpa pindah halaman.
+                    </p>
+                  </div>
+
+                  <div className="mt-5 grid gap-3">
+                    {menuItems.map((item) => (
+                      <SellerMenuButton
+                        key={item.title}
+                        title={item.title}
+                        description={item.description}
+                        icon={item.icon}
+                        active={isSellerTab(item.key) ? activeTab === item.key : false}
+                        primary={item.primary}
+                        onClick={() => handleMenuClick(item.key)}
+                      />
+                    ))}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-border bg-card p-6">
+                  {activeTab === "overview" ? (
+                    <OverviewPanel
+                      data={sevenDaySales}
+                      onOpenReport={() => openSellerTab("report")}
+                      onAddProduct={() => openSellerTab("add")}
+                    />
+                  ) : null}
+
+                  {activeTab === "add" ? (
+                    <AddProductPanel
+                      userId={user?.id ?? ""}
+                      categories={categories}
+                      onSaved={async () => {
+                        await loadDashboardData();
+                        openSellerTab("products");
+                      }}
+                    />
+                  ) : null}
+
+                  {activeTab === "products" ? (
+                    <ProductsPanel
+                      userId={user?.id ?? ""}
+                      products={products}
+                      categories={categories}
+                      highlightProductId={highlightProductId}
+                      onReload={loadDashboardData}
+                    />
+                  ) : null}
+
+                  {activeTab === "orders" ? (
+                    <OrdersPanel
+                      userId={user?.id ?? ""}
+                      orders={orders}
+                      highlightOrderId={highlightOrderId}
+                      onReload={loadDashboardData}
+                    />
+                  ) : null}
+
+                  {activeTab === "report" ? (
+                    <ReportPanel orders={orders} />
+                  ) : null}
+
+                  {activeTab === "profile" ? (
+                    <ProfilePanel
+                      form={profileForm}
+                      saving={savingProfile}
+                      onChange={updateProfileField}
+                      onSubmit={handleSaveProfile}
+                      sellerId={user?.id ?? ""}
+                    />
+                  ) : null}
+
+                  {activeTab === "settings" ? (
+                    <SettingsPanel
+                      onOpenProfile={() => openSellerTab("profile")}
+                      onOpenProducts={() => openSellerTab("products")}
+                      onOpenOrders={() => openSellerTab("orders")}
+                      onOpenReport={() => openSellerTab("report")}
+                    />
+                  ) : null}
+                </div>
+              </div>
+            </>
+          )}
+        </section>
+      </main>
+
+      <Footer />
+    </div>
+  );
+}
+
+function SellerMenuButton({
+  title,
+  description,
+  icon: Icon,
+  active,
+  primary,
+  onClick,
+}: {
+  title: string;
+  description: string;
+  icon: LucideIcon;
+  active?: boolean;
+  primary?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-2xl border p-4 text-left transition hover:-translate-y-1 hover:shadow-md ${active || primary
+        ? "border-primary/40 bg-primary/5"
+        : "border-border bg-background"
+        }`}
+    >
+      <div className="flex items-start gap-3">
+        <div
+          className={`rounded-xl p-3 ${active || primary
+            ? "bg-primary text-primary-foreground"
+            : "bg-primary/10 text-primary"
+            }`}
+        >
+          <Icon className="h-5 w-5" />
+        </div>
+
+        <div>
+          <div className="font-semibold">{title}</div>
+
+          <p className="mt-1 text-sm leading-6 text-muted-foreground">
+            {description}
+          </p>
+        </div>
+      </div>
+    </button>
+  );
+}
+
+function OverviewPanel({
+  data,
+  onOpenReport,
+  onAddProduct,
+}: {
+  data: DailySale[];
+  onOpenReport: () => void;
+  onAddProduct: () => void;
+}) {
+  return (
+    <div>
+      <h2 className="text-lg font-semibold">Ringkasan 7 Hari Terakhir</h2>
+
+      <p className="mt-1 text-sm text-muted-foreground">
+        Grafik sederhana berdasarkan order yang sudah selesai.
+      </p>
+
+      <div className="mt-5">
+        <MiniSalesChart data={data} />
+      </div>
+
+      <div className="mt-5 grid gap-2 md:grid-cols-2">
+        <Button type="button" variant="outline" onClick={onOpenReport}>
+          Buka Laporan Lengkap
+        </Button>
+
+        <Button
+          type="button"
+          className="gradient-brand text-white"
+          onClick={onAddProduct}
+        >
+          Tambah Produk Baru
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function AddProductPanel({
+  userId,
+  categories,
+  onSaved,
+}: {
+  userId: string;
+  categories: CategoryRow[];
+  onSaved: () => Promise<void>;
+}) {
+  const [saving, setSaving] = useState(false);
+
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [price, setPrice] = useState("");
+  const [originalPrice, setOriginalPrice] = useState("");
+  const [categoryId, setCategoryId] = useState("");
+  const [condition, setCondition] = useState("good");
+  const [location, setLocation] = useState("");
+  const [stock, setStock] = useState("1");
+
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [previewUrls, setPreviewUrls] = useState<string[]>([]);
+  const [fileInputKey, setFileInputKey] = useState(0);
+
+  useEffect(() => {
+    const urls = selectedFiles.map((file) => URL.createObjectURL(file));
+
+    setPreviewUrls(urls);
+
+    return () => {
+      urls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [selectedFiles]);
+
+  function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+
+    if (files.length > 5) {
+      toast.error("Maksimal upload 5 foto produk.");
+      return;
+    }
+
+    const invalidFile = files.find((file) => !file.type.startsWith("image/"));
+
+    if (invalidFile) {
+      toast.error(`File ${invalidFile.name} bukan gambar.`);
+      return;
+    }
+
+    const oversizeFile = files.find((file) => file.size > 5 * 1024 * 1024);
+
+    if (oversizeFile) {
+      toast.error(`File ${oversizeFile.name} melebihi 5 MB.`);
+      return;
+    }
+
+    setSelectedFiles(files);
+  }
+
+  function removeSelectedFile(index: number) {
+    setSelectedFiles((current) => {
+      return current.filter((_, currentIndex) => currentIndex !== index);
+    });
+  }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!userId) return;
+
+    if (!title.trim()) {
+      toast.error("Nama produk wajib diisi.");
+      return;
+    }
+
+    if (Number(price) <= 0) {
+      toast.error("Harga produk wajib lebih dari 0.");
+      return;
+    }
+
+    if (Number(stock) < 0) {
+      toast.error("Stok produk tidak valid.");
+      return;
+    }
+
+    setSaving(true);
+
+    try {
+      const uploadedImageUrls = await uploadProductImages({
+        sellerId: userId,
+        files: selectedFiles,
+      });
+
+      const { error } = await db.from("products").insert({
+        seller_id: userId,
+        title: title.trim(),
+        description: cleanText(description),
+        price: Number(price),
+        original_price: originalPrice ? Number(originalPrice) : null,
+        category_id: categoryId || null,
+        condition,
+        location: cleanText(location),
+        stock: Number(stock || 0),
+        images: uploadedImageUrls,
+        status: "pending",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+
+      if (error) throw new Error(error.message);
+
+      toast.success("Produk berhasil ditambahkan dan menunggu verifikasi admin.");
+
+      setTitle("");
+      setDescription("");
+      setPrice("");
+      setOriginalPrice("");
+      setCategoryId("");
+      setCondition("good");
+      setLocation("");
+      setStock("1");
+      setSelectedFiles([]);
+      setFileInputKey((current) => current + 1);
+
+      await onSaved();
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Gagal menambahkan produk.",
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <h2 className="text-lg font-semibold">Tambah Produk</h2>
+
+      <p className="mt-1 text-sm text-muted-foreground">
+        Upload foto dari perangkat seller. Foto akan disimpan ke Supabase
+        Storage, lalu produk masuk ke admin untuk diverifikasi.
+      </p>
+
+      <div className="mt-5 grid gap-4">
+        <div className="grid gap-2">
+          <Label>Nama Produk</Label>
+          <Input
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+            placeholder="Contoh: Jaket Denim Preloved"
+          />
+        </div>
+
+        <div className="grid gap-2">
+          <Label>Deskripsi Produk</Label>
+          <Textarea
+            value={description}
+            onChange={(event) => setDescription(event.target.value)}
+            rows={4}
+            placeholder="Jelaskan kondisi, ukuran, minus, dan detail produk."
+          />
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-2">
+          <div className="grid gap-2">
+            <Label>Harga Jual</Label>
+            <Input
+              type="number"
+              value={price}
+              onChange={(event) => setPrice(event.target.value)}
+              placeholder="100000"
+            />
+          </div>
+
+          <div className="grid gap-2">
+            <Label>Harga Awal/Coret</Label>
+            <Input
+              type="number"
+              value={originalPrice}
+              onChange={(event) => setOriginalPrice(event.target.value)}
+              placeholder="150000"
+            />
+          </div>
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-2">
+          <div className="grid gap-2">
+            <Label>Kategori</Label>
+            <select
+              value={categoryId}
+              onChange={(event) => setCategoryId(event.target.value)}
+              className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+            >
+              <option value="">Pilih kategori</option>
+              {categories.map((category) => (
+                <option key={category.id} value={category.id}>
+                  {category.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="grid gap-2">
+            <Label>Kondisi</Label>
+            <select
+              value={condition}
+              onChange={(event) => setCondition(event.target.value)}
+              className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+            >
+              <option value="like_new">Seperti Baru</option>
+              <option value="very_good">Sangat Baik</option>
+              <option value="good">Baik</option>
+              <option value="fair">Cukup</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-2">
+          <div className="grid gap-2">
+            <Label>Lokasi Produk</Label>
+            <Input
+              value={location}
+              onChange={(event) => setLocation(event.target.value)}
+              placeholder="Contoh: Bandung"
+            />
+          </div>
+
+          <div className="grid gap-2">
+            <Label>Stok</Label>
+            <Input
+              type="number"
+              min={0}
+              value={stock}
+              onChange={(event) => setStock(event.target.value)}
+            />
+          </div>
+        </div>
+
+        <div className="grid gap-2">
+          <Label>Foto Produk</Label>
+
+          <label className="flex min-h-36 cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-background p-6 text-center transition hover:bg-accent">
+            <Upload className="h-8 w-8 text-primary" />
+
+            <div className="mt-3 font-medium">
+              Klik untuk upload foto produk
+            </div>
+
+            <div className="mt-1 text-sm text-muted-foreground">
+              Maksimal 5 foto, format JPG, PNG, atau WEBP, maksimal 5 MB per
+              foto.
+            </div>
+
+            <input
+              key={fileInputKey}
+              type="file"
+              accept="image/jpeg,image/png,image/webp,image/jpg"
+              multiple
+              onChange={handleFileChange}
+              className="hidden"
+            />
+          </label>
+
+          {previewUrls.length > 0 ? (
+            <ImagePreviewGrid
+              title="Preview Foto"
+              urls={previewUrls}
+              files={selectedFiles}
+              onRemove={removeSelectedFile}
+            />
+          ) : null}
+        </div>
+      </div>
+
+      <div className="mt-6 flex justify-end">
+        <Button
+          type="submit"
+          disabled={saving}
+          className="gradient-brand text-white"
+        >
+          {saving ? (
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          ) : (
+            <PlusCircle className="mr-2 h-4 w-4" />
+          )}
+          Simpan Produk
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+function ProductsPanel({
+  userId,
+  products,
+  categories,
+  highlightProductId,
+  onReload,
+}: {
+  userId: string;
+  products: ProductRow[];
+  categories: CategoryRow[];
+  highlightProductId: string;
+  onReload: () => Promise<void>;
+}) {
+  const [search, setSearch] = useState("");
+  const [updatingId, setUpdatingId] = useState<string | null>(null);
+  const [editingProduct, setEditingProduct] = useState<ProductRow | null>(null);
+
+  useEffect(() => {
+    if (!highlightProductId) return;
+
+    window.setTimeout(() => {
+      document
+        .getElementById(`seller-product-${highlightProductId}`)
+        ?.scrollIntoView({
+          behavior: "smooth",
+          block: "center",
+        });
+    }, 250);
+  }, [highlightProductId, products.length]);
+
+  const filteredProducts = products.filter((product) => {
+    const keyword = search.trim().toLowerCase();
+
+    if (!keyword) return true;
+
+    return (
+      product.title.toLowerCase().includes(keyword) ||
+      String(product.description ?? "").toLowerCase().includes(keyword) ||
+      String(product.location ?? "").toLowerCase().includes(keyword)
+    );
+  });
+
+  async function handleUpdateStock(productId: string, stock: number) {
+    if (!userId) {
+      toast.error("ID seller tidak valid.");
+      return;
+    }
+
+    if (!Number.isFinite(stock) || stock < 0) {
+      toast.error("Stok produk tidak valid.");
+      return;
+    }
+
+    setUpdatingId(productId);
+
+    try {
+      const { error } = await db
+        .from("products")
+        .update({
+          stock,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", productId)
+        .eq("seller_id", userId);
+
+      if (error) throw new Error(error.message);
+
+      toast.success("Stok produk berhasil diperbarui.");
+      await onReload();
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Gagal memperbarui stok.",
+      );
+    } finally {
+      setUpdatingId(null);
+    }
+  }
+
+  async function handleInactive(productId: string) {
+    if (!userId) {
+      toast.error("ID seller tidak valid.");
+      return;
+    }
+
+    const confirmed = window.confirm("Nonaktifkan produk ini?");
+
+    if (!confirmed) return;
+
+    setUpdatingId(productId);
+
+    try {
+      const { error } = await db
+        .from("products")
+        .update({
+          status: "inactive",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", productId)
+        .eq("seller_id", userId);
+
+      if (error) throw new Error(error.message);
+
+      toast.success("Produk berhasil dinonaktifkan.");
+      await onReload();
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Gagal menonaktifkan produk.",
+      );
+    } finally {
+      setUpdatingId(null);
+    }
+  }
+
+  return (
+    <div>
+      <h2 className="text-lg font-semibold">Produk Saya</h2>
+
+      <p className="mt-1 text-sm text-muted-foreground">
+        Kelola produk, edit detail produk, ubah stok, dan nonaktifkan produk.
+      </p>
+
+      <div className="relative mt-5">
+        <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+
+        <Input
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder="Cari produk..."
+          className="pl-9"
+        />
+      </div>
+
+      <div className="mt-5">
+        {filteredProducts.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-border p-8 text-center">
+            <Boxes className="mx-auto h-9 w-9 text-primary" />
+
+            <h3 className="mt-3 font-semibold">Belum ada produk</h3>
+
+            <p className="mt-1 text-sm text-muted-foreground">
+              Tambahkan produk pertama dari menu Tambah Produk.
+            </p>
+          </div>
+        ) : (
+          <div className="max-h-[720px] space-y-3 overflow-y-auto pr-1">
+            {filteredProducts.map((product) => (
+              <SellerProductCard
+                key={product.id}
+                product={product}
+                highlighted={highlightProductId === product.id}
+                updating={updatingId === product.id}
+                onEdit={() => setEditingProduct(product)}
+                onUpdateStock={(stock) =>
+                  handleUpdateStock(product.id, stock)
+                }
+                onInactive={() => handleInactive(product.id)}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {editingProduct ? (
+        <EditProductModal
+          userId={userId}
+          product={editingProduct}
+          categories={categories}
+          onClose={() => setEditingProduct(null)}
+          onSaved={async () => {
+            setEditingProduct(null);
+            await onReload();
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function SellerProductCard({
+  product,
+  highlighted,
+  updating,
+  onEdit,
+  onUpdateStock,
+  onInactive,
+}: {
+  product: ProductRow;
+  highlighted: boolean;
+  updating: boolean;
+  onEdit: () => void;
+  onUpdateStock: (stock: number) => void;
+  onInactive: () => void;
+}) {
+  const [stock, setStock] = useState(String(product.stock ?? 0));
+  const image = product.images?.[0];
+  const category = getCategoryName(product);
+
+  return (
+    <div
+      id={`seller-product-${product.id}`}
+      className={`rounded-xl border bg-background p-4 transition ${highlighted
+        ? "border-primary ring-2 ring-primary/20"
+        : "border-border"
+        }`}
+    >
+      <div className="grid gap-4 md:grid-cols-[90px_1fr]">
+        <a
+          href={`/detail-produk?id=${product.id}`}
+          className="h-24 w-full overflow-hidden rounded-xl bg-muted md:w-24"
+        >
+          {image ? (
+            <img
+              src={image}
+              alt={product.title}
+              className="h-full w-full object-cover"
+            />
+          ) : (
+            <div className="flex h-full w-full items-center justify-center text-[10px] text-muted-foreground">
+              No Image
+            </div>
+          )}
+        </a>
+
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <a href={`/detail-produk?id=${product.id}`}>
+              <h3 className="font-semibold hover:text-primary">
+                {product.title}
+              </h3>
+            </a>
+
+            <span className="rounded-full bg-primary/10 px-2 py-1 text-xs font-medium text-primary">
+              {productStatusLabel(product.status)}
+            </span>
+          </div>
+
+          <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">
+            {product.description || "Tidak ada deskripsi."}
+          </p>
+
+          <div className="mt-3 grid gap-1 text-sm text-muted-foreground md:grid-cols-2">
+            <div>
+              Harga:{" "}
+              <b className="text-foreground">
+                {formatIDR(Number(product.price))}
+              </b>
+            </div>
+
+            <div>Kategori: {category}</div>
+            <div>Kondisi: {conditionLabel(product.condition)}</div>
+            <div>Lokasi: {product.location ?? "-"}</div>
+            <div>Terjual: {product.sold ?? 0}</div>
+          </div>
+
+          <div className="mt-4 grid gap-2 md:grid-cols-[1fr_auto_auto_auto]">
+            <Input
+              type="number"
+              min={0}
+              value={stock}
+              onChange={(event) => setStock(event.target.value)}
+            />
+
+            <Button
+              type="button"
+              variant="outline"
+              disabled={updating}
+              onClick={() => onUpdateStock(Number(stock))}
+            >
+              {updating ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Save className="mr-2 h-4 w-4" />
+              )}
+              Simpan Stok
+            </Button>
+
+            <Button
+              type="button"
+              variant="outline"
+              disabled={updating}
+              onClick={onEdit}
+            >
+              Edit Produk
+            </Button>
+
+            {product.status !== "inactive" ? (
+              <Button
+                type="button"
+                variant="destructive"
+                disabled={updating}
+                onClick={onInactive}
+              >
+                <XCircle className="mr-2 h-4 w-4" />
+                Nonaktifkan
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EditProductModal({
+  userId,
+  product,
+  categories,
+  onClose,
+  onSaved,
+}: {
+  userId: string;
+  product: ProductRow;
+  categories: CategoryRow[];
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [saving, setSaving] = useState(false);
+
+  const [title, setTitle] = useState(product.title ?? "");
+  const [description, setDescription] = useState(product.description ?? "");
+  const [price, setPrice] = useState(String(product.price ?? ""));
+  const [originalPrice, setOriginalPrice] = useState(
+    product.original_price ? String(product.original_price) : "",
+  );
+  const [categoryId, setCategoryId] = useState(product.category_id ?? "");
+  const [condition, setCondition] = useState(product.condition ?? "good");
+  const [location, setLocation] = useState(product.location ?? "");
+  const [stock, setStock] = useState(String(product.stock ?? 0));
+
+  const [existingImages, setExistingImages] = useState<string[]>(
+    Array.isArray(product.images) ? product.images.filter(Boolean) : [],
+  );
+  const [newFiles, setNewFiles] = useState<File[]>([]);
+  const [previewUrls, setPreviewUrls] = useState<string[]>([]);
+  const [fileInputKey, setFileInputKey] = useState(0);
+
+  useEffect(() => {
+    const urls = newFiles.map((file) => URL.createObjectURL(file));
+
+    setPreviewUrls(urls);
+
+    return () => {
+      urls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [newFiles]);
+
+  function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+
+    if (files.length === 0) return;
+
+    const totalImages = existingImages.length + newFiles.length + files.length;
+
+    if (totalImages > 5) {
+      toast.error("Maksimal total 5 foto produk.");
+      return;
+    }
+
+    const invalidFile = files.find((file) => !file.type.startsWith("image/"));
+
+    if (invalidFile) {
+      toast.error(`File ${invalidFile.name} bukan gambar.`);
+      return;
+    }
+
+    const oversizeFile = files.find((file) => file.size > 5 * 1024 * 1024);
+
+    if (oversizeFile) {
+      toast.error(`File ${oversizeFile.name} melebihi 5 MB.`);
+      return;
+    }
+
+    setNewFiles((current) => [...current, ...files]);
+    setFileInputKey((current) => current + 1);
+  }
+
+  function removeExistingImage(index: number) {
+    setExistingImages((current) =>
+      current.filter((_, currentIndex) => currentIndex !== index),
+    );
+  }
+
+  function removeNewFile(index: number) {
+    setNewFiles((current) =>
+      current.filter((_, currentIndex) => currentIndex !== index),
+    );
+  }
+
+  async function handleSave(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!userId) {
+      toast.error("ID seller tidak valid.");
+      return;
+    }
+
+    if (!title.trim()) {
+      toast.error("Nama produk wajib diisi.");
+      return;
+    }
+
+    if (Number(price) <= 0) {
+      toast.error("Harga produk wajib lebih dari 0.");
+      return;
+    }
+
+    if (Number(stock) < 0) {
+      toast.error("Stok produk tidak valid.");
+      return;
+    }
+
+    setSaving(true);
+
+    try {
+      const uploadedUrls =
+        newFiles.length > 0
+          ? await uploadProductImages({
+            sellerId: userId,
+            files: newFiles,
+          })
+          : [];
+
+      const nextImages = [...existingImages, ...uploadedUrls];
+
+      const nextStatus = product.status === "inactive" ? "inactive" : "pending";
+
+      const { error } = await db
+        .from("products")
+        .update({
+          title: title.trim(),
+          description: cleanText(description),
+          price: Number(price),
+          original_price: originalPrice ? Number(originalPrice) : null,
+          category_id: categoryId || null,
+          condition,
+          location: cleanText(location),
+          stock: Number(stock || 0),
+          images: nextImages,
+          status: nextStatus,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", product.id)
+        .eq("seller_id", userId);
+
+      if (error) throw new Error(error.message);
+
+      if (nextStatus === "pending") {
+        toast.success(
+          "Produk berhasil diperbarui dan kembali menunggu verifikasi admin.",
+        );
+      } else {
+        toast.success("Produk berhasil diperbarui.");
+      }
+
+      await onSaved();
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Gagal memperbarui produk.",
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-3xl border border-border bg-card p-6 shadow-xl">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-xl font-semibold">Edit Produk</h2>
+
+            <p className="mt-1 text-sm text-muted-foreground">
+              Ubah informasi produk. Jika produk aktif diedit, status akan
+              kembali menunggu verifikasi admin.
+            </p>
+          </div>
+
+          <Button type="button" variant="outline" onClick={onClose}>
+            Tutup
+          </Button>
+        </div>
+
+        <form onSubmit={handleSave} className="mt-6">
+          <div className="grid gap-4">
+            <div className="grid gap-2">
+              <Label>Nama Produk</Label>
+
+              <Input
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                placeholder="Nama produk"
+              />
+            </div>
+
+            <div className="grid gap-2">
+              <Label>Deskripsi Produk</Label>
+
+              <Textarea
+                value={description}
+                onChange={(event) => setDescription(event.target.value)}
+                rows={4}
+                placeholder="Deskripsi produk"
+              />
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="grid gap-2">
+                <Label>Harga Jual</Label>
+
+                <Input
+                  type="number"
+                  value={price}
+                  onChange={(event) => setPrice(event.target.value)}
+                />
+              </div>
+
+              <div className="grid gap-2">
+                <Label>Harga Awal/Coret</Label>
+
+                <Input
+                  type="number"
+                  value={originalPrice}
+                  onChange={(event) => setOriginalPrice(event.target.value)}
+                />
+              </div>
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="grid gap-2">
+                <Label>Kategori</Label>
+
+                <select
+                  value={categoryId}
+                  onChange={(event) => setCategoryId(event.target.value)}
+                  className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                >
+                  <option value="">Pilih kategori</option>
+
+                  {categories.map((category) => (
+                    <option key={category.id} value={category.id}>
+                      {category.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid gap-2">
+                <Label>Kondisi</Label>
+
+                <select
+                  value={condition}
+                  onChange={(event) => setCondition(event.target.value)}
+                  className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                >
+                  <option value="like_new">Seperti Baru</option>
+                  <option value="very_good">Sangat Baik</option>
+                  <option value="good">Baik</option>
+                  <option value="fair">Cukup</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="grid gap-2">
+                <Label>Lokasi Produk</Label>
+
+                <Input
+                  value={location}
+                  onChange={(event) => setLocation(event.target.value)}
+                  placeholder="Contoh: Bandung"
+                />
+              </div>
+
+              <div className="grid gap-2">
+                <Label>Stok</Label>
+
+                <Input
+                  type="number"
+                  min={0}
+                  value={stock}
+                  onChange={(event) => setStock(event.target.value)}
+                />
+              </div>
+            </div>
+
+            <div className="grid gap-2">
+              <Label>Foto Produk</Label>
+
+              <label className="flex min-h-32 cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-background p-6 text-center transition hover:bg-accent">
+                <Upload className="h-7 w-7 text-primary" />
+
+                <div className="mt-3 font-medium">
+                  Upload foto tambahan produk
+                </div>
+
+                <div className="mt-1 text-sm text-muted-foreground">
+                  Maksimal total 5 foto, format JPG, PNG, atau WEBP, maksimal 5
+                  MB per foto.
+                </div>
+
+                <input
+                  key={fileInputKey}
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp,image/jpg"
+                  multiple
+                  onChange={handleFileChange}
+                  className="hidden"
+                />
+              </label>
+
+              {existingImages.length > 0 ? (
+                <ImagePreviewGrid
+                  title="Foto Saat Ini"
+                  urls={existingImages}
+                  onRemove={removeExistingImage}
+                />
+              ) : null}
+
+              {previewUrls.length > 0 ? (
+                <ImagePreviewGrid
+                  title="Foto Baru"
+                  urls={previewUrls}
+                  files={newFiles}
+                  onRemove={removeNewFile}
+                />
+              ) : null}
+            </div>
+          </div>
+
+          <div className="mt-6 flex flex-wrap justify-end gap-2">
+            <Button type="button" variant="outline" onClick={onClose}>
+              Batal
+            </Button>
+
+            <Button
+              type="submit"
+              disabled={saving}
+              className="gradient-brand text-white"
+            >
+              {saving ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Save className="mr-2 h-4 w-4" />
+              )}
+              Simpan Perubahan
+            </Button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function ImagePreviewGrid({
+  title,
+  urls,
+  files,
+  onRemove,
+}: {
+  title: string;
+  urls: string[];
+  files?: File[];
+  onRemove: (index: number) => void;
+}) {
+  return (
+    <div className="mt-3">
+      <div className="mb-2 text-sm font-medium">{title}</div>
+
+      <div className="grid gap-3 md:grid-cols-3">
+        {urls.map((url, index) => (
+          <div
+            key={`${url}-${index}`}
+            className="overflow-hidden rounded-2xl border border-border bg-background"
+          >
+            <div className="aspect-square bg-muted">
+              <img
+                src={url}
+                alt={`Foto produk ${index + 1}`}
+                className="h-full w-full object-cover"
+              />
+            </div>
+
+            <div className="flex items-center justify-between gap-2 p-3">
+              <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+                <ImageIcon className="h-4 w-4 shrink-0" />
+                <span className="truncate">
+                  {files?.[index]?.name ?? `Foto ${index + 1}`}
+                </span>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => onRemove(index)}
+                className="rounded-md p-1 text-destructive hover:bg-destructive/10"
+                aria-label="Hapus foto"
+              >
+                <Trash2 className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function OrdersPanel({
+  userId,
+  orders,
+  highlightOrderId,
+  onReload,
+}: {
+  userId: string;
+  orders: OrderRow[];
+  highlightOrderId: string;
+  onReload: () => Promise<void>;
+}) {
+  const [updatingId, setUpdatingId] = useState<string | null>(null);
+  const [expandedOrderId, setExpandedOrderId] = useState<string | null>(
+    highlightOrderId || null,
+  );
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [search, setSearch] = useState("");
+  const [trackingDrafts, setTrackingDrafts] = useState<
+    Record<string, { courier: string; trackingNumber: string }>
+  >({});
+
+  useEffect(() => {
+    const nextDrafts: Record<string, { courier: string; trackingNumber: string }> =
+      {};
+
+    orders.forEach((order) => {
+      nextDrafts[order.id] = {
+        courier: order.courier ?? "",
+        trackingNumber: order.tracking_number ?? "",
+      };
+    });
+
+    setTrackingDrafts((current) => ({
+      ...nextDrafts,
+      ...current,
+    }));
+  }, [orders.length]);
+
+  useEffect(() => {
+    if (!highlightOrderId) return;
+
+    setExpandedOrderId(highlightOrderId);
+
+    window.setTimeout(() => {
+      document
+        .getElementById(`seller-order-${highlightOrderId}`)
+        ?.scrollIntoView({
+          behavior: "smooth",
+          block: "center",
+        });
+    }, 250);
+  }, [highlightOrderId, orders.length]);
+
+  const filteredOrders = orders.filter((order) => {
+    const matchStatus =
+      statusFilter === "all" ? true : order.order_status === statusFilter;
+
+    if (!matchStatus) return false;
+
+    const keyword = search.trim().toLowerCase();
+
+    if (!keyword) return true;
+
+    const orderText = [
+      order.id,
+      order.order_status,
+      order.payment_status,
+      order.payment_method,
+      order.shipping_method,
+      order.tracking_number,
+      order.courier,
+      order.shipping_address,
+      ...(order.order_items ?? []).map((item) => {
+        const product = getOrderItemProduct(item);
+        return product?.title ?? "";
+      }),
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+
+    return orderText.includes(keyword);
+  });
+
+  async function updateOrderStatus(orderId: string, nextStatus: string) {
+    if (!userId) {
+      toast.error("ID seller tidak valid.");
+      return;
+    }
+
+    setUpdatingId(orderId);
+
+    try {
+      const { error } = await db
+        .from("orders")
+        .update({
+          order_status: nextStatus,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", orderId)
+        .eq("seller_id", userId);
+
+      if (error) throw new Error(error.message);
+
+      toast.success("Status pesanan berhasil diperbarui.");
+      await onReload();
+
+      if (nextStatus === "diproses_penjual") {
+        setExpandedOrderId(orderId);
+      }
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Gagal memperbarui pesanan.",
+      );
+    } finally {
+      setUpdatingId(null);
+    }
+  }
+
+  async function saveTracking(orderId: string) {
+    if (!userId) {
+      toast.error("ID seller tidak valid.");
+      return;
+    }
+
+    const draft = trackingDrafts[orderId];
+
+    if (!draft?.courier?.trim()) {
+      toast.error("Pilih jasa kirim terlebih dahulu.");
+      return;
+    }
+
+    if (!draft?.trackingNumber?.trim()) {
+      toast.error("Nomor resi wajib diisi.");
+      return;
+    }
+
+    setUpdatingId(orderId);
+
+    try {
+      const { error } = await db
+        .from("orders")
+        .update({
+          courier: draft.courier.trim(),
+          tracking_number: draft.trackingNumber.trim(),
+          shipped_at: new Date().toISOString(),
+          order_status: "dikirim",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", orderId)
+        .eq("seller_id", userId);
+
+      if (error) throw new Error(error.message);
+
+      toast.success("Resi berhasil disimpan. Pesanan berubah menjadi dikirim.");
+      await onReload();
+      setExpandedOrderId(orderId);
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Gagal menyimpan resi.",
+      );
+    } finally {
+      setUpdatingId(null);
+    }
+  }
+
+  function setTrackingDraft(
+    orderId: string,
+    key: "courier" | "trackingNumber",
+    value: string,
+  ) {
+    setTrackingDrafts((current) => ({
+      ...current,
+      [orderId]: {
+        courier: current[orderId]?.courier ?? "",
+        trackingNumber: current[orderId]?.trackingNumber ?? "",
+        [key]: value,
+      },
+    }));
+  }
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold">Pesanan Masuk</h2>
+
+          <p className="mt-1 text-sm text-muted-foreground">
+            Proses pesanan buyer, input kurir dan nomor resi, lalu kirim
+            pesanan. Jika status sudah Diproses Penjual, form resi akan tampil
+            langsung.
+          </p>
+        </div>
+
+        <Button
+          type="button"
+          variant="outline"
+          onClick={onReload}
+          disabled={Boolean(updatingId)}
+        >
+          <RefreshCw className="mr-2 h-4 w-4" />
+          Refresh
+        </Button>
+      </div>
+
+      <div className="mt-5 grid gap-3 md:grid-cols-[1fr_220px]">
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+
+          <Input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Cari order ID, nama produk, resi, kurir..."
+            className="pl-9"
+          />
+        </div>
+
+        <select
+          value={statusFilter}
+          onChange={(event) => setStatusFilter(event.target.value)}
+          className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+        >
+          <option value="all">Semua Status</option>
+          <option value="menunggu_konfirmasi_penjual">
+            Menunggu Konfirmasi
+          </option>
+          <option value="diproses_penjual">Diproses Penjual</option>
+          <option value="dikirim">Dikirim</option>
+          <option value="pesanan_diterima">Pesanan Diterima</option>
+          <option value="selesai">Selesai</option>
+          <option value="dibatalkan">Dibatalkan</option>
+        </select>
+      </div>
+
+      <div className="mt-5">
+        {filteredOrders.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-border p-8 text-center">
+            <Package className="mx-auto h-9 w-9 text-primary" />
+
+            <h3 className="mt-3 font-semibold">Belum ada pesanan</h3>
+
+            <p className="mt-1 text-sm text-muted-foreground">
+              Pesanan buyer akan muncul di sini setelah checkout berhasil.
+            </p>
+          </div>
+        ) : (
+          <div className="max-h-[820px] space-y-4 overflow-y-auto pr-1">
+            {filteredOrders.map((order) => (
+              <SellerOrderCard
+                key={order.id}
+                order={order}
+                highlighted={highlightOrderId === order.id}
+                expanded={expandedOrderId === order.id}
+                updating={updatingId === order.id}
+                draft={trackingDrafts[order.id]}
+                onToggleExpanded={() =>
+                  setExpandedOrderId((current) =>
+                    current === order.id ? null : order.id,
+                  )
+                }
+                onProcess={() =>
+                  updateOrderStatus(order.id, "diproses_penjual")
+                }
+                onSaveTracking={() => saveTracking(order.id)}
+                onTrackingChange={(key, value) =>
+                  setTrackingDraft(order.id, key, value)
+                }
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SellerOrderCard({
+  order,
+  highlighted,
+  expanded,
+  updating,
+  draft,
+  onToggleExpanded,
+  onProcess,
+  onSaveTracking,
+  onTrackingChange,
+}: {
+  order: OrderRow;
+  highlighted: boolean;
+  expanded: boolean;
+  updating: boolean;
+  draft?: { courier: string; trackingNumber: string };
+  onToggleExpanded: () => void;
+  onProcess: () => void;
+  onSaveTracking: () => void;
+  onTrackingChange: (key: "courier" | "trackingNumber", value: string) => void;
+}) {
+  const canProcess = canProcessSellerOrder(order);
+  const canInputTracking = canInputSellerTracking(order);
+  const alreadyShipped =
+    Boolean(order.tracking_number) || order.order_status === "dikirim";
+
+  const firstItem = order.order_items?.[0] ?? null;
+  const firstProduct = firstItem ? getOrderItemProduct(firstItem) : null;
+  const itemCount = order.order_items?.length ?? 0;
+
+  return (
+    <div
+      id={`seller-order-${order.id}`}
+      className={`rounded-xl border bg-background p-4 transition ${highlighted
+        ? "border-primary ring-2 ring-primary/20"
+        : "border-border"
+        }`}
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex min-w-0 gap-3">
+          <div className="h-16 w-16 shrink-0 overflow-hidden rounded-lg bg-muted">
+            {firstProduct?.images?.[0] ? (
+              <img
+                src={firstProduct.images[0]}
+                alt={firstProduct.title}
+                className="h-full w-full object-cover"
+              />
+            ) : (
+              <div className="flex h-full w-full items-center justify-center text-[10px] text-muted-foreground">
+                No Image
+              </div>
+            )}
+          </div>
+
+          <div className="min-w-0">
+            <div className="font-mono text-xs font-semibold md:text-sm">
+              {order.id}
+            </div>
+
+            <div className="mt-1 line-clamp-1 text-sm font-medium">
+              {firstProduct?.title ?? "Produk"}
+              {itemCount > 1 ? ` +${itemCount - 1} produk lain` : ""}
+            </div>
+
+            <div className="mt-1 text-xs text-muted-foreground">
+              Dibuat: {new Date(order.created_at).toLocaleString("id-ID")}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap justify-end gap-2">
+          <span className={sellerOrderStatusClass(order.order_status)}>
+            {orderStatusLabel(order.order_status)}
+          </span>
+
+          <span className="rounded-full bg-green-100 px-3 py-1 text-xs font-medium text-green-700">
+            {paymentStatusLabel(order.payment_status)}
+          </span>
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-3 rounded-xl bg-accent p-4 text-sm md:grid-cols-4">
+        <Info label="Total" value={formatIDR(getOrderTotal(order))} strong />
+        <Info label="Metode Kirim" value={order.shipping_method || "-"} />
+        <Info
+          label="Metode Bayar"
+          value={paymentMethodLabel(order.payment_method)}
+        />
+        <Info label="Produk" value={`${itemCount} item`} />
+      </div>
+
+      {canInputTracking ? (
+        <div className="mt-4 rounded-xl border border-primary/30 bg-primary/5 p-4">
+          <div className="font-semibold text-primary">Input Resi Pengiriman</div>
+
+          <p className="mt-1 text-sm text-muted-foreground">
+            Pilih kurir dan isi nomor resi untuk mengubah pesanan menjadi
+            Dikirim.
+          </p>
+
+          <div className="mt-3 grid gap-3 md:grid-cols-[180px_1fr_auto]">
+            <select
+              value={draft?.courier ?? ""}
+              onChange={(event) =>
+                onTrackingChange("courier", event.target.value)
+              }
+              className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+            >
+              <option value="">Pilih Kurir</option>
+              {COURIER_OPTIONS.map((courier) => (
+                <option key={courier} value={courier}>
+                  {courier}
+                </option>
+              ))}
+            </select>
+
+            <Input
+              value={draft?.trackingNumber ?? ""}
+              onChange={(event) =>
+                onTrackingChange("trackingNumber", event.target.value)
+              }
+              placeholder="Nomor resi, contoh: JN123456789"
+            />
+
+            <Button
+              type="button"
+              disabled={updating}
+              onClick={onSaveTracking}
+              className="gradient-brand text-white"
+            >
+              {updating ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Truck className="mr-2 h-4 w-4" />
+              )}
+              Simpan Resi
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {alreadyShipped ? (
+        <div className="mt-4 rounded-xl border border-purple-200 bg-purple-50 p-4 text-sm text-purple-950">
+          <div className="font-semibold">Detail Pengiriman</div>
+
+          <div className="mt-2 grid gap-2 md:grid-cols-3">
+            <Info label="Jasa Kirim" value={order.courier || "-"} />
+            <Info label="Nomor Resi" value={order.tracking_number || "-"} />
+            <Info
+              label="Tanggal Kirim"
+              value={
+                order.shipped_at
+                  ? new Date(order.shipped_at).toLocaleString("id-ID")
+                  : "-"
+              }
+            />
+          </div>
+        </div>
+      ) : null}
+
+      <div className="mt-4 flex flex-wrap justify-end gap-2">
+        <Button asChild variant="outline">
+          <a href={`/invoice?order=${order.id}`}>Invoice</a>
+        </Button>
+        <Button type="button" variant="outline" onClick={onToggleExpanded}>
+          {expanded ? "Tutup Detail" : "Lihat Detail"}
+        </Button>
+
+        {canProcess ? (
+          <Button
+            type="button"
+            disabled={updating}
+            onClick={onProcess}
+            className="gradient-brand text-white"
+          >
+            {updating ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <CheckCircle2 className="mr-2 h-4 w-4" />
+            )}
+            Proses Pesanan
+          </Button>
+        ) : null}
+      </div>
+
+      {expanded ? (
+        <div className="mt-4 border-t border-border pt-4">
+          <div className="space-y-3">
+            {order.order_items?.map((item) => {
+              const product = getOrderItemProduct(item);
+
+              return (
+                <div
+                  key={item.id}
+                  className="flex gap-3 rounded-xl border border-border p-3"
+                >
+                  <a
+                    href={`/detail-produk?id=${item.product_id}`}
+                    className="h-16 w-16 shrink-0 overflow-hidden rounded-lg bg-muted"
+                  >
+                    {product?.images?.[0] ? (
+                      <img
+                        src={product.images[0]}
+                        alt={product.title}
+                        className="h-full w-full object-cover"
+                      />
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center text-[10px] text-muted-foreground">
+                        No Image
+                      </div>
+                    )}
+                  </a>
+
+                  <div className="min-w-0 flex-1">
+                    <a
+                      href={`/detail-produk?id=${item.product_id}`}
+                      className="line-clamp-1 font-medium hover:text-primary"
+                    >
+                      {product?.title ?? "Produk"}
+                    </a>
+
+                    <div className="mt-1 text-sm text-muted-foreground">
+                      {item.quantity} x {formatIDR(Number(item.price))}
+                    </div>
+
+                    <div className="mt-1 text-sm font-semibold">
+                      {formatIDR(Number(item.price) * Number(item.quantity))}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="mt-4 grid gap-3 border-t border-border pt-4 text-sm md:grid-cols-2">
+            <Info
+              label="Subtotal"
+              value={formatIDR(Number(order.subtotal ?? 0))}
+            />
+            <Info
+              label="Ongkir"
+              value={formatIDR(Number(order.shipping_cost ?? 0))}
+            />
+          </div>
+
+          <div className="mt-4 rounded-xl bg-accent p-4 text-sm">
+            <div className="font-medium">Alamat Pengiriman</div>
+            <div className="mt-1 text-muted-foreground">
+              {order.shipping_address || "-"}
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+function ReportPanel({ orders }: { orders: OrderRow[] }) {
+  const [range, setRange] = useState("7");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
+
+  const dateRange = useMemo(() => {
+    const end = new Date();
+    const start = new Date();
+
+    if (range === "custom") {
+      const customStartDate = customStart
+        ? new Date(`${customStart}T00:00:00`)
+        : null;
+
+      const customEndDate = customEnd
+        ? new Date(`${customEnd}T23:59:59`)
+        : null;
+
+      return {
+        start: customStartDate,
+        end: customEndDate,
+        label:
+          customStart && customEnd
+            ? `${customStart} sampai ${customEnd}`
+            : "Custom tanggal",
+      };
+    }
+
+    const days = Number(range);
+    start.setDate(start.getDate() - (days - 1));
+    start.setHours(0, 0, 0, 0);
+    end.setHours(23, 59, 59, 999);
+
+    return {
+      start,
+      end,
+      label: `${days} hari terakhir`,
+    };
+  }, [range, customStart, customEnd]);
+
+  const completedOrders = useMemo(() => {
+    return orders.filter((order) => {
+      const validStatus = ["selesai", "pesanan_diterima"].includes(
+        String(order.order_status ?? ""),
+      );
+
+      const validPayment = String(order.payment_status ?? "") === "dibayar";
+
+      if (!validStatus || !validPayment) return false;
+
+      if (!dateRange.start || !dateRange.end) return true;
+
+      const orderDate = new Date(order.created_at);
+
+      return orderDate >= dateRange.start && orderDate <= dateRange.end;
+    });
+  }, [orders, dateRange]);
+
+  const salesData = useMemo(() => {
+    const fallbackEnd = new Date();
+    const fallbackStart = new Date();
+    fallbackStart.setDate(fallbackStart.getDate() - 6);
+
+    return buildDailySales({
+      orders: completedOrders,
+      start: dateRange.start ?? fallbackStart,
+      end: dateRange.end ?? fallbackEnd,
+    });
+  }, [completedOrders, dateRange]);
+
+  const productSummary = useMemo(() => {
+    return buildProductSalesSummaryForExport(completedOrders);
+  }, [completedOrders]);
+
+  const revenue = useMemo(() => {
+    return completedOrders.reduce((sum, order) => {
+      return sum + getOrderTotal(order);
+    }, 0);
+  }, [completedOrders]);
+
+  const totalSoldItems = useMemo(() => {
+    return completedOrders.reduce((sum, order) => {
+      return (
+        sum +
+        (order.order_items ?? []).reduce((itemSum, item) => {
+          return itemSum + Number(item.quantity ?? 0);
+        }, 0)
+      );
+    }, 0);
+  }, [completedOrders]);
+
+  const averageOrderValue =
+    completedOrders.length > 0 ? revenue / completedOrders.length : 0;
+
+  function handleExportOrdersCsv() {
+    if (completedOrders.length === 0) {
+      toast.error("Belum ada order selesai untuk diexport.");
+      return;
+    }
+
+    const csv = toCsvForExport([
+      [
+        "Order ID",
+        "Tanggal",
+        "Status Order",
+        "Status Pembayaran",
+        "Metode Bayar",
+        "Metode Kirim",
+        "Kurir",
+        "Resi",
+        "Produk",
+        "Subtotal",
+        "Ongkir",
+        "Total",
+      ],
+      ...completedOrders.map((order) => {
+        const productNames = (order.order_items ?? [])
+          .map((item) => {
+            const product = getOrderItemProduct(item);
+            return `${product?.title ?? "Produk"} x${item.quantity}`;
+          })
+          .join(" | ");
+
+        return [
+          order.id,
+          new Date(order.created_at).toLocaleString("id-ID"),
+          orderStatusLabel(order.order_status),
+          paymentStatusLabel(order.payment_status),
+          paymentMethodLabel(order.payment_method),
+          order.shipping_method ?? "-",
+          order.courier ?? "-",
+          order.tracking_number ?? "-",
+          productNames,
+          Number(order.subtotal ?? 0),
+          Number(order.shipping_cost ?? 0),
+          getOrderTotal(order),
+        ];
+      }),
+    ]);
+
+    downloadTextFileForExport({
+      filename: `revibe-laporan-order-${safeFileDateForExport()}.csv`,
+      content: csv,
+      mimeType: "text/csv;charset=utf-8;",
+    });
+
+    toast.success("CSV laporan order berhasil dibuat.");
+  }
+
+  function handleExportProductsCsv() {
+    if (productSummary.length === 0) {
+      toast.error("Belum ada produk terjual untuk diexport.");
+      return;
+    }
+
+    const csv = toCsvForExport([
+      ["Produk", "Product ID", "Jumlah Terjual", "Omzet"],
+      ...productSummary.map((item) => [
+        item.title,
+        item.productId,
+        item.quantity,
+        item.revenue,
+      ]),
+    ]);
+
+    downloadTextFileForExport({
+      filename: `revibe-laporan-produk-${safeFileDateForExport()}.csv`,
+      content: csv,
+      mimeType: "text/csv;charset=utf-8;",
+    });
+
+    toast.success("CSV ringkasan produk berhasil dibuat.");
+  }
+
+  function handleExportPdf() {
+    if (completedOrders.length === 0) {
+      toast.error("Belum ada order selesai untuk dibuat PDF.");
+      return;
+    }
+
+    const html = buildSellerReportPrintHtmlForExport({
+      title: "Laporan Penjualan Seller ReVibe",
+      period: dateRange.label,
+      revenue,
+      totalOrders: completedOrders.length,
+      totalSoldItems,
+      averageOrderValue,
+      orders: completedOrders,
+      productSummary,
+    });
+
+    const printWindow = window.open("", "_blank", "width=1100,height=800");
+
+    if (!printWindow) {
+      toast.error("Popup browser diblokir. Izinkan popup untuk export PDF.");
+      return;
+    }
+
+    printWindow.document.open();
+    printWindow.document.write(html);
+    printWindow.document.close();
+
+    printWindow.onload = () => {
+      printWindow.focus();
+      printWindow.print();
+    };
+
+    toast.success("Jendela PDF dibuka. Pilih Save as PDF di dialog print.");
+  }
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold">Laporan Penjualan</h2>
+
+          <p className="mt-1 text-sm text-muted-foreground">
+            Lihat omzet, order selesai, barang terjual, grafik penjualan, dan
+            export laporan seller.
+          </p>
+        </div>
+
+        <select
+          value={range}
+          onChange={(event) => setRange(event.target.value)}
+          className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+        >
+          <option value="7">7 hari</option>
+          <option value="14">14 hari</option>
+          <option value="30">30 hari</option>
+          <option value="custom">Custom tanggal</option>
+        </select>
+      </div>
+
+      {range === "custom" ? (
+        <div className="mt-5 grid gap-3 rounded-xl border border-border bg-background p-4 md:grid-cols-2">
+          <div className="grid gap-2">
+            <label className="text-sm font-medium">Tanggal Mulai</label>
+
+            <Input
+              type="date"
+              value={customStart}
+              onChange={(event) => setCustomStart(event.target.value)}
+            />
+          </div>
+
+          <div className="grid gap-2">
+            <label className="text-sm font-medium">Tanggal Akhir</label>
+
+            <Input
+              type="date"
+              value={customEnd}
+              onChange={(event) => setCustomEnd(event.target.value)}
+            />
+          </div>
+        </div>
+      ) : null}
+
+      <div className="mt-5 grid gap-3 md:grid-cols-4">
+        <div className="rounded-xl border border-border bg-background p-4">
+          <div className="text-sm text-muted-foreground">Omzet Selesai</div>
+          <div className="mt-2 text-xl font-bold">{formatIDR(revenue)}</div>
+        </div>
+
+        <div className="rounded-xl border border-border bg-background p-4">
+          <div className="text-sm text-muted-foreground">Order Selesai</div>
+          <div className="mt-2 text-xl font-bold">{completedOrders.length}</div>
+        </div>
+
+        <div className="rounded-xl border border-border bg-background p-4">
+          <div className="text-sm text-muted-foreground">Produk Terjual</div>
+          <div className="mt-2 text-xl font-bold">{totalSoldItems}</div>
+        </div>
+
+        <div className="rounded-xl border border-border bg-background p-4">
+          <div className="text-sm text-muted-foreground">Rata-rata Order</div>
+          <div className="mt-2 text-xl font-bold">
+            {formatIDR(averageOrderValue)}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-5 rounded-xl border border-primary/30 bg-primary/5 p-4">
+        <div className="mb-3 font-semibold text-primary">Export Laporan</div>
+
+        <div className="grid gap-2 md:grid-cols-3">
+          <Button type="button" variant="outline" onClick={handleExportOrdersCsv}>
+            Export CSV Order
+          </Button>
+
+          <Button
+            type="button"
+            variant="outline"
+            onClick={handleExportProductsCsv}
+          >
+            Export CSV Produk
+          </Button>
+
+          <Button
+            type="button"
+            className="gradient-brand text-white"
+            onClick={handleExportPdf}
+          >
+            Export PDF
+          </Button>
+        </div>
+      </div>
+
+      <div className="mt-5">
+        <MiniSalesChart data={salesData} />
+      </div>
+
+      <div className="mt-5 rounded-xl border border-border bg-background p-4">
+        <h3 className="font-semibold">Produk Terlaris</h3>
+
+        <div className="mt-3 space-y-2">
+          {productSummary.length === 0 ? (
+            <div className="text-sm text-muted-foreground">
+              Belum ada produk terjual pada periode ini.
+            </div>
+          ) : (
+            productSummary.slice(0, 10).map((item, index) => (
+              <div
+                key={item.productId}
+                className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-card p-3 text-sm"
+              >
+                <div>
+                  <div className="font-medium">
+                    {index + 1}. {item.title}
+                  </div>
+
+                  <div className="text-muted-foreground">
+                    Terjual {item.quantity} produk
+                  </div>
+                </div>
+
+                <div className="font-bold">{formatIDR(item.revenue)}</div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
+      <div className="mt-5 rounded-xl border border-border bg-background p-4">
+        <h3 className="font-semibold">Ringkasan Order Selesai</h3>
+
+        <div className="mt-3 space-y-2">
+          {completedOrders.length === 0 ? (
+            <div className="text-sm text-muted-foreground">
+              Belum ada order selesai pada periode ini.
+            </div>
+          ) : (
+            completedOrders.slice(0, 10).map((order) => (
+              <div
+                key={order.id}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-card p-3 text-sm"
+              >
+                <div>
+                  <div className="font-medium">Order {order.id}</div>
+
+                  <div className="text-muted-foreground">
+                    {new Date(order.created_at).toLocaleString("id-ID")}
+                  </div>
+                </div>
+
+                <div className="font-bold">
+                  {formatIDR(getOrderTotal(order))}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+type ProductSalesSummaryForExport = {
+  productId: string;
+  title: string;
+  quantity: number;
+  revenue: number;
+};
+
+function buildProductSalesSummaryForExport(orders: OrderRow[]) {
+  const map = new Map<string, ProductSalesSummaryForExport>();
+
+  orders.forEach((order) => {
+    (order.order_items ?? []).forEach((item) => {
+      const product = getOrderItemProduct(item);
+      const productId = String(item.product_id ?? "");
+      const title = product?.title ?? "Produk";
+      const quantity = Number(item.quantity ?? 0);
+      const revenue = Number(item.price ?? 0) * quantity;
+
+      const existing = map.get(productId);
+
+      if (existing) {
+        existing.quantity += quantity;
+        existing.revenue += revenue;
+      } else {
+        map.set(productId, {
+          productId,
+          title,
+          quantity,
+          revenue,
+        });
+      }
+    });
+  });
+
+  return Array.from(map.values()).sort((a, b) => {
+    if (b.quantity !== a.quantity) return b.quantity - a.quantity;
+    return b.revenue - a.revenue;
+  });
+}
+
+function toCsvForExport(rows: Array<Array<string | number | null | undefined>>) {
+  return (
+    "\ufeff" +
+    rows
+      .map((row) =>
+        row
+          .map((cell) => {
+            const value = String(cell ?? "");
+            const escaped = value.replace(/"/g, '""');
+            return `"${escaped}"`;
+          })
+          .join(","),
+      )
+      .join("\n")
+  );
+}
+
+function downloadTextFileForExport({
+  filename,
+  content,
+  mimeType,
+}: {
+  filename: string;
+  content: string;
+  mimeType: string;
+}) {
+  const blob = new Blob([content], {
+    type: mimeType,
+  });
+
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+
+  URL.revokeObjectURL(url);
+}
+
+function safeFileDateForExport() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function buildSellerReportPrintHtmlForExport({
+  title,
+  period,
+  revenue,
+  totalOrders,
+  totalSoldItems,
+  averageOrderValue,
+  orders,
+  productSummary,
+}: {
+  title: string;
+  period: string;
+  revenue: number;
+  totalOrders: number;
+  totalSoldItems: number;
+  averageOrderValue: number;
+  orders: OrderRow[];
+  productSummary: ProductSalesSummaryForExport[];
+}) {
+  const orderRows = orders
+    .map((order) => {
+      const productNames = (order.order_items ?? [])
+        .map((item) => {
+          const product = getOrderItemProduct(item);
+
+          return `${escapeHtmlForExport(product?.title ?? "Produk")} x${Number(
+            item.quantity ?? 0,
+          )}`;
+        })
+        .join("<br />");
+
+      return `
+        <tr>
+          <td>${escapeHtmlForExport(order.id)}</td>
+          <td>${escapeHtmlForExport(
+        new Date(order.created_at).toLocaleString("id-ID"),
+      )}</td>
+          <td>${productNames}</td>
+          <td>${escapeHtmlForExport(orderStatusLabel(order.order_status))}</td>
+          <td>${escapeHtmlForExport(paymentStatusLabel(order.payment_status))}</td>
+          <td>${escapeHtmlForExport(formatIDR(getOrderTotal(order)))}</td>
+        </tr>
+      `;
+    })
+    .join("");
+
+  const productRows = productSummary
+    .map((item, index) => {
+      return `
+        <tr>
+          <td>${index + 1}</td>
+          <td>${escapeHtmlForExport(item.title)}</td>
+          <td>${item.quantity}</td>
+          <td>${escapeHtmlForExport(formatIDR(item.revenue))}</td>
+        </tr>
+      `;
+    })
+    .join("");
+
+  return `
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <title>${escapeHtmlForExport(title)}</title>
+        <style>
+          * { box-sizing: border-box; }
+          body {
+            font-family: Arial, sans-serif;
+            color: #111827;
+            margin: 32px;
+          }
+          h1 { margin: 0; font-size: 24px; }
+          h2 { margin-top: 28px; font-size: 18px; }
+          .muted { color: #6b7280; font-size: 13px; }
+          .summary {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+            margin-top: 20px;
+          }
+          .card {
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 14px;
+          }
+          .label { color: #6b7280; font-size: 12px; }
+          .value { margin-top: 6px; font-size: 18px; font-weight: 700; }
+          table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 12px;
+            font-size: 12px;
+          }
+          th, td {
+            border: 1px solid #e5e7eb;
+            padding: 8px;
+            text-align: left;
+            vertical-align: top;
+          }
+          th { background: #f9fafb; }
+          @media print {
+            body { margin: 16px; }
+            .no-print { display: none; }
+          }
+        </style>
+      </head>
+
+      <body>
+        <button class="no-print" onclick="window.print()" style="margin-bottom:16px;padding:10px 14px;border:1px solid #ddd;border-radius:8px;background:white;cursor:pointer;">
+          Print / Save as PDF
+        </button>
+
+        <h1>${escapeHtmlForExport(title)}</h1>
+        <div class="muted">Periode: ${escapeHtmlForExport(period)}</div>
+        <div class="muted">Dibuat: ${escapeHtmlForExport(
+    new Date().toLocaleString("id-ID"),
+  )}</div>
+
+        <div class="summary">
+          <div class="card">
+            <div class="label">Omzet</div>
+            <div class="value">${escapeHtmlForExport(formatIDR(revenue))}</div>
+          </div>
+
+          <div class="card">
+            <div class="label">Order Selesai</div>
+            <div class="value">${totalOrders}</div>
+          </div>
+
+          <div class="card">
+            <div class="label">Produk Terjual</div>
+            <div class="value">${totalSoldItems}</div>
+          </div>
+
+          <div class="card">
+            <div class="label">Rata-rata Order</div>
+            <div class="value">${escapeHtmlForExport(
+    formatIDR(averageOrderValue),
+  )}</div>
+          </div>
+        </div>
+
+        <h2>Produk Terlaris</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>No</th>
+              <th>Produk</th>
+              <th>Jumlah Terjual</th>
+              <th>Omzet</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${productRows ||
+    `<tr><td colspan="4">Belum ada produk terjual.</td></tr>`
+    }
+          </tbody>
+        </table>
+
+        <h2>Daftar Order Selesai</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Order ID</th>
+              <th>Tanggal</th>
+              <th>Produk</th>
+              <th>Status</th>
+              <th>Pembayaran</th>
+              <th>Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${orderRows ||
+    `<tr><td colspan="6">Belum ada order selesai.</td></tr>`
+    }
+          </tbody>
+        </table>
+      </body>
+    </html>
+  `;
+}
+
+function escapeHtmlForExport(value: string) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function ProfilePanel({
+  form,
+  saving,
+  onChange,
+  onSubmit,
+  sellerId,
+}: {
+  form: ProfileForm;
+  saving: boolean;
+  onChange: <K extends keyof ProfileForm>(key: K, value: ProfileForm[K]) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  sellerId: string;
+}) {
+  return (
+    <form onSubmit={onSubmit}>
+      <h2 className="text-lg font-semibold">Profil Toko</h2>
+
+      <p className="mt-1 text-sm text-muted-foreground">
+        Atur identitas seller dan informasi toko.
+      </p>
+
+      <div className="mt-5 grid gap-4">
+        <div className="grid gap-3 md:grid-cols-2">
+          <div className="grid gap-2">
+            <Label>Nama Pemilik</Label>
+
+            <Input
+              value={form.full_name}
+              onChange={(event) => onChange("full_name", event.target.value)}
+              placeholder="Nama lengkap"
+            />
+          </div>
+
+          <div className="grid gap-2">
+            <Label>WhatsApp</Label>
+
+            <Input
+              value={form.whatsapp}
+              onChange={(event) => onChange("whatsapp", event.target.value)}
+              placeholder="08xxxxxxxxxx"
+            />
+          </div>
+        </div>
+
+        <div className="grid gap-2">
+          <Label>URL Avatar</Label>
+
+          <Input
+            value={form.avatar_url}
+            onChange={(event) => onChange("avatar_url", event.target.value)}
+            placeholder="https://..."
+          />
+        </div>
+
+        <div className="grid gap-2">
+          <Label>Alamat Seller</Label>
+
+          <Textarea
+            value={form.address}
+            onChange={(event) => onChange("address", event.target.value)}
+            rows={3}
+            placeholder="Alamat seller"
+          />
+        </div>
+
+        <div className="grid gap-2">
+          <Label>Kota</Label>
+
+          <Input
+            value={form.city}
+            onChange={(event) => onChange("city", event.target.value)}
+            placeholder="Kota"
+          />
+        </div>
+
+        <div className="grid gap-2">
+          <Label>Bio Seller</Label>
+
+          <Textarea
+            value={form.bio}
+            onChange={(event) => onChange("bio", event.target.value)}
+            rows={3}
+            placeholder="Deskripsi singkat seller"
+          />
+        </div>
+
+        <div className="border-t border-border pt-4">
+          <h3 className="font-semibold">Informasi Toko</h3>
+        </div>
+
+        <div className="grid gap-2">
+          <Label>Nama Toko</Label>
+
+          <Input
+            value={form.shop_name}
+            onChange={(event) => onChange("shop_name", event.target.value)}
+            placeholder="Nama toko"
+          />
+        </div>
+
+        <div className="grid gap-2">
+          <Label>Deskripsi Toko</Label>
+
+          <Textarea
+            value={form.shop_description}
+            onChange={(event) =>
+              onChange("shop_description", event.target.value)
+            }
+            rows={3}
+            placeholder="Deskripsi toko"
+          />
+        </div>
+
+        <div className="grid gap-2">
+          <Label>Lokasi Toko</Label>
+
+          <Input
+            value={form.shop_location}
+            onChange={(event) => onChange("shop_location", event.target.value)}
+            placeholder="Contoh: Bandung"
+          />
+        </div>
+
+        <div className="grid gap-2">
+          <Label>URL Logo Toko</Label>
+
+          <Input
+            value={form.shop_logo_url}
+            onChange={(event) => onChange("shop_logo_url", event.target.value)}
+            placeholder="https://..."
+          />
+        </div>
+      </div>
+
+      <div className="mt-6 flex justify-end">
+        <Button
+          type="submit"
+          disabled={saving || !sellerId}
+          className="gradient-brand text-white"
+        >
+          {saving ? (
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          ) : (
+            <Save className="mr-2 h-4 w-4" />
+          )}
+          Simpan Profil
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+function SettingsPanel({
+  onOpenProfile,
+  onOpenProducts,
+  onOpenOrders,
+  onOpenReport,
+}: {
+  onOpenProfile: () => void;
+  onOpenProducts: () => void;
+  onOpenOrders: () => void;
+  onOpenReport: () => void;
+}) {
+  return (
+    <div>
+      <h2 className="text-lg font-semibold">Pengaturan Seller</h2>
+
+      <p className="mt-1 text-sm text-muted-foreground">
+        Shortcut untuk mengelola area penting toko.
+      </p>
+
+      <div className="mt-5 grid gap-3 md:grid-cols-2">
+        <Button type="button" variant="outline" onClick={onOpenProfile}>
+          <UserRound className="mr-2 h-4 w-4" />
+          Edit Profil Toko
+        </Button>
+
+        <Button type="button" variant="outline" onClick={onOpenProducts}>
+          <Boxes className="mr-2 h-4 w-4" />
+          Kelola Produk
+        </Button>
+
+        <Button type="button" variant="outline" onClick={onOpenOrders}>
+          <ShoppingBag className="mr-2 h-4 w-4" />
+          Kelola Pesanan
+        </Button>
+
+        <Button type="button" variant="outline" onClick={onOpenReport}>
+          <BarChart3 className="mr-2 h-4 w-4" />
+          Laporan Penjualan
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function MiniSalesChart({ data }: { data: DailySale[] }) {
+  const maxValue = Math.max(...data.map((item) => Number(item.total ?? 0)), 1);
+  const hasData = data.some((item) => Number(item.total ?? 0) > 0);
+
+  return (
+    <div className="rounded-2xl border border-border bg-background p-5">
+      {!hasData ? (
+        <div className="flex min-h-64 flex-col items-center justify-center rounded-xl border border-dashed border-border text-center">
+          <BarChart3 className="h-10 w-10 text-primary" />
+
+          <div className="mt-3 font-semibold">Belum ada data grafik</div>
+
+          <p className="mt-1 text-sm text-muted-foreground">
+            Data akan muncul setelah ada order selesai.
+          </p>
+        </div>
+      ) : (
+        <div className="w-full">
+          <div className="mb-4 flex items-center justify-between">
+            <div>
+              <div className="text-sm font-semibold">Grafik Penjualan</div>
+              <div className="text-xs text-muted-foreground">
+                Berdasarkan omzet order selesai per hari.
+              </div>
+            </div>
+
+            <div className="rounded-full bg-primary/10 px-3 py-1 text-xs font-medium text-primary">
+              Max {formatIDR(maxValue)}
+            </div>
+          </div>
+
+          <div className="relative h-72 rounded-xl border border-border bg-card px-4 pb-8 pt-6">
+            <div className="absolute inset-x-4 top-6 border-t border-dashed border-border" />
+            <div className="absolute inset-x-4 top-1/2 border-t border-dashed border-border" />
+            <div className="absolute inset-x-4 bottom-16 border-t border-dashed border-border" />
+
+            <div className="relative z-10 flex h-full items-end gap-3">
+              {data.map((item) => {
+                const total = Number(item.total ?? 0);
+                const percentage = total > 0 ? (total / maxValue) * 100 : 0;
+                const height = total > 0 ? Math.max(percentage, 8) : 0;
+
+                return (
+                  <div
+                    key={item.label}
+                    className="flex h-full min-w-0 flex-1 flex-col items-center justify-end"
+                  >
+                    <div className="mb-2 h-5 text-center text-[10px] font-medium text-foreground">
+                      {total > 0 ? formatIDR(total) : "-"}
+                    </div>
+
+                    <div className="flex h-44 w-full items-end justify-center">
+                      {total > 0 ? (
+                        <div
+                          className="w-full max-w-12 rounded-t-xl bg-primary shadow-sm transition-all duration-300 hover:bg-primary/80"
+                          style={{
+                            height: `${height}%`,
+                            minHeight: "14px",
+                          }}
+                          title={`${item.label}: ${formatIDR(total)}`}
+                        />
+                      ) : (
+                        <div className="h-1 w-full max-w-12 rounded-full bg-muted" />
+                      )}
+                    </div>
+
+                    <div className="mt-3 truncate text-center text-[11px] text-muted-foreground">
+                      {item.label}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function buildDailySales({
+  orders,
+  start,
+  end,
+}: {
+  orders: OrderRow[];
+  start: Date;
+  end: Date;
+}) {
+  const result: DailySale[] = [];
+  const cursor = new Date(start);
+
+  cursor.setHours(0, 0, 0, 0);
+
+  const safeEnd = new Date(end);
+  safeEnd.setHours(23, 59, 59, 999);
+
+  while (cursor <= safeEnd) {
+    const label = cursor.toLocaleDateString("id-ID", {
+      day: "2-digit",
+      month: "short",
+    });
+
+    const dayStart = new Date(cursor);
+    dayStart.setHours(0, 0, 0, 0);
+
+    const dayEnd = new Date(cursor);
+    dayEnd.setHours(23, 59, 59, 999);
+
+    const total = orders
+      .filter((order) => {
+        const orderDate = new Date(order.created_at);
+        return orderDate >= dayStart && orderDate <= dayEnd;
+      })
+      .reduce((sum, order) => {
+        return sum + getOrderTotal(order);
+      }, 0);
+
+    result.push({
+      label,
+      total,
+    });
+
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  return result;
+}
+
+function getCategoryName(product: ProductRow) {
+  if (Array.isArray(product.categories)) {
+    return product.categories[0]?.name ?? "-";
+  }
+
+  return product.categories?.name ?? "-";
+}
+
+function getOrderItemProduct(item: OrderItemRow) {
+  if (Array.isArray(item.products)) {
+    return item.products[0] ?? null;
+  }
+
+  return item.products ?? null;
+}
+
+function getOrderTotal(order: OrderRow) {
+  return Number(order.total ?? 0);
+}
+
+function canProcessSellerOrder(order: OrderRow) {
+  const status = String(order.order_status ?? "");
+  const payment = String(order.payment_status ?? "");
+
+  return (
+    payment === "dibayar" &&
+    [
+      "menunggu_konfirmasi_penjual",
+      "menunggu_konfirmasi",
+      "paid",
+      "baru",
+      "order_baru",
+    ].includes(status)
+  );
+}
+
+function canInputSellerTracking(order: OrderRow) {
+  const status = String(order.order_status ?? "");
+  const payment = String(order.payment_status ?? "");
+
+  return (
+    payment === "dibayar" &&
+    !order.tracking_number &&
+    ["diproses_penjual", "diproses", "processing", "processed"].includes(
+      status,
+    )
+  );
+}
+
+function sellerOrderStatusClass(status: string | null) {
+  const safeStatus = String(status ?? "");
+
+  if (safeStatus === "dikirim") {
+    return "rounded-full bg-purple-100 px-3 py-1 text-xs font-medium text-purple-700";
+  }
+
+  if (safeStatus === "selesai" || safeStatus === "pesanan_diterima") {
+    return "rounded-full bg-green-100 px-3 py-1 text-xs font-medium text-green-700";
+  }
+
+  if (safeStatus === "dibatalkan") {
+    return "rounded-full bg-red-100 px-3 py-1 text-xs font-medium text-red-700";
+  }
+
+  if (safeStatus === "diproses_penjual" || safeStatus === "diproses") {
+    return "rounded-full bg-blue-100 px-3 py-1 text-xs font-medium text-blue-700";
+  }
+
+  return "rounded-full bg-primary/10 px-3 py-1 text-xs font-medium text-primary";
+}
+
+function productStatusLabel(status: string | null) {
+  const labels: Record<string, string> = {
+    pending: "Menunggu Verifikasi",
+    approved: "Aktif",
+    active: "Aktif",
+    rejected: "Ditolak",
+    inactive: "Nonaktif",
+  };
+
+  return labels[String(status ?? "")] ?? status ?? "-";
+}
+
+function orderStatusLabel(status: string | null) {
+  const labels: Record<string, string> = {
+    menunggu_pembayaran: "Menunggu Pembayaran",
+    menunggu_konfirmasi_penjual: "Menunggu Konfirmasi Penjual",
+    menunggu_konfirmasi: "Menunggu Konfirmasi",
+    diproses_penjual: "Diproses Penjual",
+    diproses: "Diproses",
+    dikirim: "Dikirim",
+    pesanan_diterima: "Pesanan Diterima",
+    selesai: "Selesai",
+    dibatalkan: "Dibatalkan",
+  };
+
+  return labels[String(status ?? "")] ?? status ?? "-";
+}
+
+function paymentStatusLabel(status: string | null) {
+  const labels: Record<string, string> = {
+    menunggu_pembayaran: "Menunggu Pembayaran",
+    dibayar: "Dibayar",
+    gagal: "Gagal",
+    dikembalikan: "Dikembalikan",
+  };
+
+  return labels[String(status ?? "")] ?? status ?? "-";
+}
+
+function paymentMethodLabel(method: string | null) {
+  const labels: Record<string, string> = {
+    cod: "COD",
+    transfer_bank: "Transfer Bank",
+    qris: "QRIS",
+  };
+
+  return labels[String(method ?? "")] ?? method ?? "-";
+}
+
+function conditionLabel(condition: string | null) {
+  const labels: Record<string, string> = {
+    like_new: "Seperti Baru",
+    very_good: "Sangat Baik",
+    good: "Baik",
+    fair: "Cukup",
+  };
+
+  return labels[String(condition ?? "")] ?? condition ?? "-";
+}
+
+function cleanText(value: string) {
+  const cleanValue = value.trim();
+
+  return cleanValue.length > 0 ? cleanValue : null;
+}
+
+function formatIDR(value: number) {
+  if (!Number.isFinite(value)) return "Rp 0";
+
+  return "Rp " + new Intl.NumberFormat("id-ID").format(value);
+}
+
+function Info({
+  label,
+  value,
+  strong,
+}: {
+  label: string;
+  value: string | null;
+  strong?: boolean;
+}) {
+  return (
+    <div>
+      <div className="text-muted-foreground">{label}</div>
+
+      <div className={strong ? "text-lg font-bold text-primary" : "font-medium"}>
+        {value || "-"}
+      </div>
+    </div>
+  );
+}
+
+
+
